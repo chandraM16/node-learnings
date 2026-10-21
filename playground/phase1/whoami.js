@@ -7,3 +7,4 @@ console.log(
   Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
   "MB",
 );
+console.log(process)

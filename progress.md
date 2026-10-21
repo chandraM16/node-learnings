@@ -1,9 +1,9 @@
 # Learning Progress
 
-_Last updated: 2026-10-20 (Exercise 1.1 evaluated)_
+_Last updated: 2026-10-20 (Lessons 1.1–1.3 complete, exercises evaluated)_
 
 ## Current Phase
-**Phase 1 — Node.js Foundations** → Lesson 1.1
+**Phase 1 — Node.js Foundations** → next: Lesson 1.4 (libuv)
 
 ### Baseline (assessment 2026-10-19)
 Answered honestly; 11 of 12 "pta nahi". Confirmed **genuine zero** on:
@@ -30,9 +30,8 @@ Language: Hinglish. TypeScript added as Phase 2.5.
 - Diagnostic assessment (2026-10-19) — baseline established
 
 ## In Progress
-- **Lesson 1.1 — What Node.js actually is** — exercise attempted 2026-10-20.
-  Tasks done, **review questions skipped**; re-issued in simplified form (R1–R3).
-  Not yet *Practiced* — waiting on comprehension answers.
+- **Lesson 1.4 — libuv** — not started. This is the lesson that finally answers
+  assessment question A1 (concurrency without threads) in full.
 
 ## Needs Review
 _(nothing yet)_
@@ -43,7 +42,7 @@ _(nothing yet)_
 
 | Phase | Title | State |
 |-------|-------|-------|
-| 1 | Node.js Foundations | **in progress** (1/15 lessons) |
+| 1 | Node.js Foundations | **in progress** (3/15 lessons) |
 | 2 | Asynchronous Node.js | not started |
 | 2.5 | TypeScript for Node Backend | not started |
 | 3 | Node.js Core APIs | not started |
@@ -63,21 +62,30 @@ _Populated as topics are taught. Format: topic — state — note._
 ### Phase 1 — Node.js Foundations
 | Topic | State | Note |
 |-------|-------|------|
-| 1.1 What Node.js is (runtime anatomy) | Introduced | tasks done; review Qs re-issued simplified |
-| 1.1a Globals: window/document/process/fetch/require | **Practiced** | 5/5 correct in Task 2 |
-| 1.1b The process & PID | Introduced | gap found in Task 3, taught 2026-10-20 |
-| 1.1c Why a process stays alive (handle refcount) | Introduced | partial answer in Task 5; M-002 |
-| 1.1d CJS vs ESM detection | Introduced | surfaced early by Task 4; full lesson 1.10–1.12 |
-| 1.2 Node vs browser JS | not started | |
-| 1.3 V8 | not started | |
-| 1.4 libuv | not started | |
+| 1.1 What Node.js is (runtime anatomy) | **Practiced** | R1–R5 answered 2026-10-20, 4/5 solid |
+| 1.1a Globals: window/document/process/fetch/require | **Practiced** | 5/5 in Task 2 |
+| 1.1b The process & PID | **Practiced** | gap in Task 3, taught, then used correctly in R5 |
+| 1.1c Why a process stays alive (handle refcount) | Introduced | M-002; **in revisit queue** |
+| 1.1d CJS vs ESM detection | Introduced | surfaced early; full lesson 1.10–1.12 |
+| 1.2 Node vs browser JS | **Practiced** | 6/6 predictions; CORS + sandbox blast radius taught after |
+| 1.2a Trust model (why fs exists in Node, not browser) | **Practiced** | reasoned it independently in Task 3/4 |
+| 1.2b CORS as a browser-only rule | Introduced | could not run browser test; **revisit in Phase 4** |
+| 1.3 V8 — tiered JIT & warm-up | **Practiced** | measured 8.32x cold/hot ratio himself |
+| 1.3a Heap limits & fatal OOM | **Practiced** | strong Task 3 answer, incl. "raising the limit isn't the fix" |
+| 1.3b GC (generational, stop-the-world) | Introduced | not yet exercised; Phase 8 depth |
+| 1.3c CPU-bound blocking the loop | Introduced | got the queuing half of Task 4, **missed the memory half** |
+| 1.4 libuv | not started | **next** |
 | 1.5 Event loop part 1 | not started | |
 | 1.6–1.15 | not started | see roadmap |
 
 ---
 
 ## Exercises Completed
-_(none yet)_
+| Exercise | Result |
+|---|---|
+| 1.1 — What Node.js is | Tasks done; review Qs initially skipped, then 4/5 solid on retry |
+| 1.2 — Node vs browser | **6/6** predictions correct (predicted before running); Tasks 3–4 reasoned well |
+| 1.3 — V8 | Tasks 1–2 correct; **Task 3 strong** (production-grade answer); Task 4 half |
 
 ## Projects
 
@@ -99,13 +107,19 @@ _(none yet)_
 Everything is unlearned rather than weak at this point. Priority order derived
 from the assessment (these are the gaps that hurt a backend engineer most):
 
-1. **Async scheduling / event loop** (B1) — highest priority, Phase 1–2
+1. **Async scheduling / event loop** (B1) — highest priority, **Lesson 1.4–1.5 next**
 2. **Sequential vs parallel async** (B2) — most common real perf bug
 3. **async inside array callbacks** (B3) — *active misconception*, Phase 2
 4. **DB transactions & connection pooling** (C1) — Phase 5
 5. **Streams & memory** (C2) — Phase 3
 6. **Idempotency / race conditions** (D1, D2) — Phase 5–6
 7. **HTTP semantics & auth** (E1, E2) — Phase 4
+10. **Reasoning at the right level of abstraction** — new, 2026-10-20: on
+    Exercise 1.3 Task 4 he answered a systems question with V8-internals detail.
+    Knowing *which layer a question lives at* is itself a skill; keep asking
+    "yeh sawaal kis layer ka hai?"
+11. **Memory as a capacity constraint** — got the queuing failure but not the
+    concurrent-memory failure, despite nailing the memory question just before.
 8. **Modules & npm** (F1, F2) — Phase 1
 9. **TypeScript** — Phase 2.5
 
@@ -115,14 +129,27 @@ _Items pulled into later lessons to test retention._
   (event loop) and again in Phase 6 (graceful shutdown)
 - **PID / one process = one JS thread** — re-ask when `cluster` arrives (Phase 3)
 - **`require` undefined in ESM** — re-ask in Lesson 1.11
+- **CPU-bound work blocks timers/health checks, and missed ticks are lost** —
+  re-ask in Lesson 1.5 and when `worker_threads` arrives (Phase 3)
+- **Container limit vs heap limit (`OOMKilled`)** — re-ask in Phase 6 (Docker)
+- **GC is stop-the-world → a latency problem, not just memory** — re-ask Phase 8
+- **CORS is a browser rule** — re-ask when we implement CORS in Phase 4
 
 ## Teaching Observations
-- 2026-10-20: answers are very terse; skipped the written comprehension section
-  entirely. Observation tasks get done, explanation tasks get avoided.
-  **Adjustment:** fewer questions, more guided (fill-in-the-blank), and state
-  explicitly that written answers are the gate to the next lesson. Watch whether
-  this is reluctance to write or genuine difficulty — the distinction changes
-  the teaching speed.
+- 2026-10-20 (early): answers very terse; skipped the written comprehension
+  section entirely. **Adjustment applied:** fewer, more guided questions, and
+  made clear that written answers gate the next lesson.
+- 2026-10-20 (later): **the adjustment worked and then some.** He answered the
+  original five questions, predicted before running (6/6 on 1.2), and produced a
+  genuinely senior-level answer on the `OOMKilled` debugging task — including
+  "raising `--max-old-space-size` is not the fix", which most engineers miss.
+  **Conclusion: this was reluctance to write, not difficulty.** Difficulty is
+  now being increased: denser lessons, less hand-holding, design and debugging
+  tasks over observation tasks.
+- Pattern to keep watching: he reasons well about *sharing* and about *memory*
+  in isolation, but does not yet combine constraints (memory × concurrency).
+  Also tends to drop to the lowest available abstraction level when unsure.
+  Both are normal at this stage; both are now in Weak Areas.
 
 ## Misconceptions Caught
 - **M-001** — "`async` inside `forEach` makes it slower." `open`, Phase 2.
@@ -134,6 +161,8 @@ _Items pulled into later lessons to test retention._
 ---
 
 ## Milestones
+- [x] Can explain what Node.js *is* — runtime vs language vs framework, and why
+      `fs` exists on the server but not in the browser (2026-10-20)
 - [ ] Can explain the event loop accurately, including phase ordering
 - [ ] Can predict output of non-trivial async code reliably
 - [ ] Built a CLI tool with proper signal/exit-code handling

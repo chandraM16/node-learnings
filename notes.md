@@ -127,13 +127,208 @@ socket handle in the count, permanently.
 never reached zero" is the *mechanism*. When a process refuses to exit in
 production, the useful question is **which handle is still referenced**.
 
-### V8
-_pending — Lesson 1.3. So far: compiles and runs JS, owns the heap and GC;
-cannot do I/O._
+## Node vs Browser JavaScript
+**Lesson 1.2 · 2026-10-20**
+
+Same language, **different contract**. The reason is not capability — it is **trust**.
+
+> A browser runs code from *strangers*, unasked: you open a site and it executes
+> immediately. So the browser is a **jail** — no files, no sockets, no OS.
+> Node runs code *you wrote or chose to install*, on *your* server, deliberately.
+> No jail needed; touching files and ports is the whole job.
+>
+> *Simple words mein: browser JavaScript ko OS se bachata hai. Node JavaScript
+> ko OS deta hai.*
+
+**The flip side:** `npm install` puts a stranger's code on your machine **with
+your full privileges**. Browser code can never do that. This is why supply-chain
+attacks are a backend problem (Lesson 1.14).
+
+### Who has what (measured on Node v22.21.1)
+| | APIs |
+|---|---|
+| **Node only** | `fs`, `net`, `http` (server), `child_process`, `worker_threads`, `os`, `process`, `cluster` |
+| **Browser only** | `document`, `window`, `localStorage`, `sessionStorage`, `alert`, `history`, `XMLHttpRequest` |
+| **Both** (Web Standards adopted by Node) | `fetch`, `URL`, `URLSearchParams`, `AbortController`, `TextEncoder`, `structuredClone`, `queueMicrotask`, `EventTarget`, `Blob`, `FormData`, `Headers`, `Request`, `Response`, `WebSocket`, `ReadableStream`/`WritableStream`/`TransformStream`, `crypto`, `performance`, `console`, `navigator` |
+
+Browser-only APIs are absent because there is **no screen, no user, no tab** —
+not because of a technical limit (`jsdom` can simulate a DOM for tests).
+
+Surprise: `window` is absent but **`navigator` exists** —
+`navigator.hardwareConcurrency` gives CPU count (8 on this machine), useful for
+sizing a `cluster`.
+
+`globalThis` works in both (`window` in browsers, `global` in Node).
+
+### CORS is a browser rule, not a server rule
+```js
+fetch("https://api.github.com/...")   // Node:    always allowed
+                                       // Browser: only if the server sends CORS headers
+```
+**Why:** the browser attaches **the user's cookies automatically**. Without the
+same-origin policy, `evil.com` could call `yourbank.com/transfer` with your live
+session. Node has no cookies, no user, no ambient authority — **nothing to
+protect**, so no CORS.
+
+> **Consequence:** a CORS error in your React app is fixed **on the backend**,
+> never in the frontend. (Implemented in Phase 4.)
+
+### Two separate walls between browser and database
+A `validateEmail(email)` pure function **can** be shared browser/server.
+The same function doing a DB existence check **cannot**:
+1. **Impossible** — the browser cannot open a raw TCP socket, so `pg` cannot run there
+2. **Wrong even if possible** — DB credentials would ship to every user
+
+Correct shape: browser → `POST /check-email` → server → DB. The server *is* the
+wall.
+
+### Blast radius of a malicious dependency
+| | Compromised npm package |
+|---|---|
+| **On a server** | whole machine, every user's data, DB credentials, internal network — **all at once** |
+| **In a browser** | only that page, that one user, while the tab is open (still real: token theft, **Magecart** card skimming) |
+
+Both bad. The server one is far worse.
+
+**Gotchas:** looking for `window` in Node (use `globalThis`) · wanting
+`localStorage` on a server (server state → Redis/DB) · thinking Node's file
+access is about *power* rather than *trust* · treating `npm install` as harmless.
+
+---
+
+## V8
+**Lesson 1.3 · 2026-10-20**
+
+V8 does exactly three things: **compile JS → run it → manage memory.** Each has
+a production consequence.
+
+### Not an interpreter — a tiered JIT
+1. **Parse** → syntax tree
+2. **Ignition** → **bytecode**, starts running immediately (fast start, average speed)
+3. **Profiler** watches which functions are hot and what types flow through them
+4. Hot functions → **Maglev/TurboFan** compile them to **optimized machine code**,
+   specialised to the *observed* types
+5. If an assumption breaks (numbers, then suddenly a string) → **deoptimize**
+
+This exists because JS has no static types: V8 must **guess** what the code does,
+and rewards correct guesses.
+
+**Measured — the same function, same input, 6 rounds:**
+```
+Round 1: 21.66 ms     ← cold, bytecode
+Round 2:  3.39 ms
+Round 3:  3.17 ms     ← optimized, ~7x faster
+Round 6:  3.25 ms
+```
+
+**Production meaning:**
+- **Benchmarks lie without warm-up.** Measuring the first iteration is worthless.
+- **The first requests after a deploy are slower** — fresh process = cold V8.
+  A new instance should not be given full traffic instantly.
+- That small latency spike on the deploy graph is normal, and now explained.
+
+### Heap and its hard limit
+```bash
+node -p "require('node:v8').getHeapStatistics().heap_size_limit"
+```
+| config | limit |
+|---|---|
+| default (this machine) | **4144 MB** |
+| `--max-old-space-size=256` | 304 MB |
+| `--max-old-space-size=128` | 176 MB |
+
+(The reported limit exceeds the flag because it includes the young generation.)
+
+### Heap OOM is fatal, not catchable
+Filling the heap **inside a `try/catch`**:
+```
+<--- Last few GCs --->
+[58958] 177 ms: Mark-Compact 255.8 (266.7) -> 255.1 (266.7) MB ...
+FATAL ERROR: Reached heap limit — JavaScript heap out of memory
+```
+The `catch` never ran; the line after it never printed. **The process just died.**
+
+> **Rule:** heap exhaustion is **not** a JS exception. It cannot be caught,
+> handled, or recovered from. This is why a slow leak is so dangerous — no
+> warning, then instant death, taking every in-flight request with it.
+
+### Garbage collection
+Generational, based on the fact that **most objects die young** (objects made in
+a request handler are garbage once the response is sent):
+- **Young generation** — **Scavenge**: frequent, cheap, promotes survivors
+- **Old generation** — **Mark-Compact**: rare, **expensive** (seen in the OOM output)
+
+> **GC is stop-the-world.** During a major GC, *your JavaScript stops.* So high
+> memory use is not only a memory problem — it is a **latency** problem. More
+> garbage → more pauses → worse p99. (Measured in Phase 8.)
+
+### The classic production mistake: container limit ≠ heap limit
+```
+Kubernetes memory limit: 512Mi      ← kills the process here
+Node heap limit:         4144 MB    ← Node thinks it has 4 GB
+```
+Node grows past the container limit → **`SIGKILL` → `OOMKilled`**. No JS error,
+no stack trace, no logs — just a restarting pod.
+
+**Fix:** keep the heap limit **below** the container limit (Node's total RSS is
+larger than the heap: buffers, stacks, native memory):
+```bash
+node --max-old-space-size=384 app.js                      # for a 512Mi container
+node --max-old-space-size=768 --heapsnapshot-near-heap-limit=2 app.js
+```
+The second flag **writes a heap snapshot automatically** as the limit nears —
+turning an invisible kill into something diagnosable.
+
+> **Order of operations:** setting the limit makes the failure **visible**;
+> finding the leak is the **actual fix**. Do both, in that order.
+> Raising the limit alone just postpones the crash.
+
+**Gotchas:** "JS is slow because it's interpreted" ✗ (slowness is usually
+algorithms or I/O) · benchmarking without warm-up ✗ · trying to `try/catch` an
+OOM ✗ · `--max-old-space-size` is a **ceiling**, not an allocation ✗
+
+### CPU-bound JS blocks *everything* (not just requests)
+One handler doing 2 seconds of pure CPU, with a 100 ms health-check interval
+running alongside:
+```
+[health] tick 1 @ 102ms
+[health] tick 2 @ 203ms
+[request] PDF start @ 252ms
+[request] PDF ready @ 2252ms     ← 2 full seconds of nothing
+[health] tick 3 @ 2252ms
+Total ticks: 10                   ← should have been 20
+```
+Missed ticks are **lost forever** — Node does not replay them.
+
+So blocking does not only delay other requests. It silently kills:
+- `/health` → the orchestrator concludes the service is dead and **restarts a
+  merely busy pod**
+- every timer, retry, keep-alive
+- metrics collection (gaps in the graphs)
+
+**Two independent failures when 20 such requests arrive together:**
+1. **Serialization** — they queue, they do not parallelise. The last one waits ~40s.
+2. **Memory** — 20 × 50 MB ≈ 1 GB resident at once (queued request data is held
+   in memory while it waits) → heap limit → fatal OOM.
+
+And they **feed each other**: slower requests → longer queue → more memory →
+more GC → GC pauses the thread → slower still. This is a **death spiral**, and
+it is how real outages actually unfold.
+
+**Correct shape:** CPU work does not belong on the main thread.
+`worker_threads` (Phase 3), or better — enqueue it, let a separate worker
+process do it, return `202 Accepted` (Phase 6 / Project 5) — plus a
+**concurrency limit** so 20 never run at once.
+
+### V8 — still to cover
+_Hidden classes, inline caches, monomorphism, deopt in detail, heap snapshots,
+CPU profiling: Phase 8._
 
 ### libuv
 _pending — Lesson 1.4. So far: provides the event loop, the thread pool, and
-OS-level async I/O. Written originally for Node._
+OS-level async I/O. Written originally for Node. Also owns the **active handle
+counter** that decides when the process exits (see "Why a Node process stays
+alive")._
 
 ### Event Loop
 _pending_
