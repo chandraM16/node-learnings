@@ -74,3 +74,95 @@ file ko ESM maan ke chala diya.
 
 **Lesson (mere liye):** version-dependent behavior **claim karne se pehle chalao**.
 CLAUDE.md §3 rule 10 yahi kehta hai.
+
+---
+
+## M-004 — "Ek thread hai, toh thread free hone pe ek hi request milegi"
+- **Date:** 2026-10-25 (Lesson 1.4 follow-up)
+- **Status:** `corrected` — needs a spaced-repetition check in Lesson 1.5
+
+**Maine kya kaha:** 10 clients ne block ke dauraan request bheji → "woh kernel
+mein rahengi aur thread free hone pr **ek hi** request milegi."
+
+**Pehla hissa sahi** (kernel mein padi rehti hain), **doosra galat.**
+
+Do cheezein mila di:
+- *"ek waqt mein ek chalti hai"* — ✅ sahi
+- *"sirf ek deliver hoti hai"* — ❌ galat
+
+Thread free hone pe Node kernel se poochhta hai "kaun-kaun taiyaar hai", aur
+kernel **saare 10** bata deta hai. Measured: 10 handlers thread free hone ke
+**7ms** ke andar chal gaye.
+
+**Asli natija:** block = **sabko latency**, data loss nahi. Loss tabhi shuru hota
+hai jab accept queue (default backlog 511) bhar jaaye.
+
+**Yaad rakhne wali line:** ek thread ye tay karta hai **ek waqt mein kitna
+chalega**, ye nahi ki **kitna rakha ja sakta hai**.
+
+---
+
+## M-005 — "Kernel ka socket aur Node ka socket alag hote hain"
+- **Date:** 2026-10-25 (Lesson 1.4 follow-up)
+- **Status:** `corrected`
+
+**Maine poochha:** "OS kernel jo sockets pe nazar rakhta hai woh Node ke socket
+se alag hai, right?"
+
+**Nahi — ek hi socket hai, aur woh kernel ke andar hai.** Node ke paas sirf ek
+**file descriptor** (number, e.g. `12`) hota hai. JS ka `server` object us number
+ka wrapper hai; buffers aur TCP state sab kernel ki memory mein.
+
+`epoll`/`kqueue` bhi unhi fd numbers pe nazar rakhta hai — matlab **ek object,
+do taraf se dekha ja raha hai.**
+
+**Mental model:** fd = cloakroom token. Coat kernel ke paas, token Node ke paas.
+
+---
+
+## M-006 — "Callback kernel ko dete hain, aur kernel usko chalata hai"
+- **Date:** 2026-10-25 (apna mental model likhte waqt)
+- **Status:** `corrected` — Lesson 1.5 mein spaced-rep check
+
+**Maine kya kaha:** "async operation OS kernel ko batata hai aur usko callback
+deta hai... jab kernel operation khatam karta hai toh woh callback main thread ko
+deta hai run karne ke liye."
+
+**Kernel ko JavaScript ka wajood hi nahi pata.** Uski poori bhasha: *"fd 15
+readable"*, *"fd 16 writable"*, *"ye operation complete"*. Numbers aur status, bas.
+
+Callback **libuv** ke paas rehta hai, apni table mein. Kernel sirf readiness
+batata hai; libuv dekhta hai ki us readiness ka JavaScript kaunsa hai; **event
+loop** tay karta hai ki woh kab chalega.
+
+**Aur isi ke andar ek doosri baat chhupi thi:** callback us waqt nahi chalta jab
+kaam poora hota hai. Poora hone pe woh sirf **eligible** banta hai — chalta tab
+hai jab (a) main thread free ho aur (b) event loop sahi phase pe pahunche.
+
+**Revisit:** Lesson 1.5 — order decide karna event loop ka poora kaam hai.
+
+---
+
+## M-007 — "Koi bhi async operation kernel ko jaata hai"
+- **Date:** 2026-10-25 (apna mental model likhte waqt)
+- **Status:** `corrected` — **re-test zaroori**, ye Lesson 1.5 ke liye load-bearing hai
+
+**Maine kya kaha:** "file read karni hai ya **koi bhi** async operation, woh OS
+kernel ko batata hai."
+
+**File read kernel ko async nahi jaata.** Do bilkul alag raaste hain:
+
+| Kaam | Raasta | Thread lagti hai? |
+|---|---|---|
+| network (DB, API, response) | kernel — epoll/kqueue | **nahi** |
+| `fs`, `dns.lookup`, `zlib`, `crypto` | **thread pool (4)** | **haan** |
+
+`fs.readFile` mein libuv pool se ek thread uthata hai aur **woh thread normal
+blocking read karti hai** — purane model jaisa hi. "Async" isliye lagta hai ki
+*meri* thread block nahi hui, par **kahin ek thread block hui thi.**
+
+**Yahi wajah hai** ki pool bharta hai aur kernel wala raasta kabhi nahi bharta.
+Pool bhara ho toh kaam **shuru bhi nahi hota**, line mein lagta hai.
+
+**Revisit:** Lesson 1.5, phir Phase 3 (streams, `worker_threads`), phir Phase 4
+(bcrypt/auth capacity).

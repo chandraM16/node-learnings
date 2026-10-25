@@ -324,16 +324,429 @@ process do it, return `202 Accepted` (Phase 6 / Project 5) — plus a
 _Hidden classes, inline caches, monomorphism, deopt in detail, heap snapshots,
 CPU profiling: Phase 8._
 
-### libuv
-_pending — Lesson 1.4. So far: provides the event loop, the thread pool, and
-OS-level async I/O. Written originally for Node. Also owns the **active handle
-counter** that decides when the process exits (see "Why a Node process stays
-alive")._
+---
 
-### Event Loop
-_pending_
+## libuv
+**Lesson 1.4 · 2026-10-24/25**
 
-### process & globals
+V8 runs JavaScript but cannot touch the outside world. **libuv** is the C library
+that talks to the OS for Node. It provides the **event loop**, async network I/O,
+async file I/O, DNS, child processes, signals, timers, the **thread pool**, and
+the **active-handle counter** that decides when the process exits (see "Why a
+Node process stays alive").
+
+It also hides a nasty portability problem — every OS does async I/O differently:
+
+| OS | Mechanism |
+|---|---|
+| Linux | `epoll` |
+| macOS / BSD | `kqueue` |
+| Windows | **IOCP** (a fundamentally different design) |
+
+One libuv API over all three. This is why code written on macOS runs in a Linux
+container unchanged.
+
+### Where concurrency actually comes from (answers assessment A1)
+The common wrong answer: *"Node secretly uses lots of threads."* **It does not.**
+
+Old server model: one thread per request, and the thread **sits blocked** waiting
+for the DB. 1000 requests = 1000 threads ≈ 1 GB of stacks, mostly doing nothing.
+
+Node's model:
+```
+request arrives → hand the socket to the OS: "tell me when this is readable"
+                → move on immediately, take the next request
+                → OS: "fd 847 has data"
+                → run that socket's callback
+```
+
+**Nobody waited.** The kernel's `epoll`/`kqueue` can watch thousands of sockets
+in a single call and report which are ready. **That bookkeeping is the kernel's
+job, not a thread's.**
+
+> **Mental model:** old model = one waiter standing beside each customer until
+> their food is ready. Node = **one waiter plus an order board**: take every
+> order, pin it up, deliver whatever is ready. The waiter never stands still.
+>
+> *Simple words mein: concurrency threads se nahi aati — "intezaar mat karo" se
+> aati hai.*
+
+**Measured** — 50 concurrent requests against a local server with a 200 ms delay
+each, on **one** JS thread:
+```
+First done  @ 244 ms
+Last done   @ 251 ms
+Total       @ 251 ms      (sequential would be ~10 s)
+```
+
+### The two completely separate paths
+```
+┌──────────────────────────────────────────────┐
+│  Your JavaScript — ONE thread, always        │
+├──────────────────────────────────────────────┤
+│  libuv                                       │
+│   Network I/O ──→ OS (epoll/kqueue/IOCP)     │  ← NO threads, scales to 1000s
+│   File I/O    ──→ ┌──────────────┐           │
+│   dns.lookup  ──→ │ Thread Pool  │           │  ← default only 4
+│   zlib        ──→ │  4 threads   │           │
+│   some crypto ──→ └──────────────┘           │
+└──────────────────────────────────────────────┘
+```
+Network has a good async OS API. File I/O historically does not; `getaddrinfo`
+(DNS) is blocking; some crypto is pure CPU. Those go to a **thread pool**.
+
+| Operation | Path | Limit |
+|---|---|---|
+| TCP/HTTP server & client, sockets | **OS event notification** | thousands |
+| all `fs` operations | **thread pool** | **4** |
+| `dns.lookup()` (so also `fetch`/`pg` connecting by hostname) | **thread pool** | **4** |
+| `zlib` (gzip/brotli) | **thread pool** | **4** |
+| `crypto.pbkdf2`, `scrypt`, `randomBytes`, bcrypt | **thread pool** | **4** |
+| `dns.resolve()` (c-ares) | OS/network | thousands |
+| your plain JS (loops, `JSON.parse`) | **main thread** | 1 |
+
+### Measured: the thread pool wall
+8 concurrent `pbkdf2` calls (thread pool work):
+```
+default pool (4)              UV_THREADPOOL_SIZE=8
+Task 1 @  88ms                Task 7 @ 104ms
+Task 3 @  90ms                Task 8 @ 105ms
+Task 2 @  90ms                Task 3 @ 105ms
+Task 4 @ 101ms  ← first 4     Task 2 @ 109ms
+Task 7 @ 184ms                Task 4 @ 117ms
+Task 6 @ 188ms                Task 1 @ 117ms
+Task 5 @ 189ms                Task 5 @ 124ms
+Task 8 @ 197ms  ← next 4      Task 6 @ 126ms  ← all 8, one batch
+```
+**Same code, half the time**, from one env var. Meanwhile the 50-request network
+test was unaffected by the pool size — **proof the two paths are separate.**
+
+**Important:** the thread pool does **not** make your JavaScript parallel. The
+pool runs C++ work (reading a file, hashing); the **callback comes back to the
+single JS thread**.
+
+> **"Node is single-threaded" — the full truth:** *Node's JavaScript* is
+> single-threaded, always. *Node the process* is not: main thread + 4 pool
+> threads + V8 background threads (GC, compilation) ≈ 10 threads you never asked
+> for.
+
+### Tuning
+```bash
+UV_THREADPOOL_SIZE=16 node app.js
+```
+**Must be set before the process starts** — the pool is created on first use.
+`process.env.UV_THREADPOOL_SIZE = 16` inside the code **does nothing**.
+Don't inflate it blindly: those threads compete for the same cores
+(8 on this machine), so 64 threads makes everything slower.
+
+### How this bites in production
+1. **Hidden login capacity.** `bcrypt`/`pbkdf2` use the pool → **at most 4
+   password verifications at a time**, regardless of core count. 100 concurrent
+   logins → 96 queued, and **CPU graphs look idle.**
+2. **The DNS trap.** `dns.lookup()` uses the pool. A service making many outbound
+   HTTP calls resolves hostnames constantly → **pool saturates** → now `fs` and
+   `zlib` stall too. Looks like "the network is slow"; it is your own thread pool.
+3. **Pool saturation is invisible in normal metrics** — CPU idle, memory fine, DB
+   fast, requests still slow. Knowing the pool *exists* is the whole diagnosis.
+
+**Gotchas:** "Node is multi-threaded internally, that's why it's fast" ✗
+(network concurrency is the **kernel**) · "the pool parallelises my JS" ✗ ·
+setting `UV_THREADPOOL_SIZE` in code ✗ · raising it without regard to core
+count ✗ · trying to offload CPU-bound **JS** to the pool ✗ (that needs
+`worker_threads`, Phase 3).
+
+### A socket is a kernel object — Node only holds a number
+*(clarified 2026-10-25)*
+
+**There is no "Node socket" separate from the "kernel socket". There is one
+socket, and it lives in the kernel.** Node holds a **file descriptor** — an
+integer:
+```
+[server] listening. socket ka file descriptor = 12
+```
+The JS `server` object is a thin wrapper around `12`. All real socket state —
+buffers, TCP state machine, connection queue — is **kernel memory**.
+`epoll`/`kqueue` watch the same fds, so Node and the kernel are looking at **one
+object from two sides**.
+
+> **Mental model:** the fd is a **cloakroom token**. The coat is with the kernel;
+> Node holds the token. Asking "what happened on fd 12?" asks about *that one*
+> coat.
+
+`listen(8888)` is three kernel calls:
+```
+socket()   → kernel creates the socket, returns fd 12
+bind(12)   → "this socket owns port 8888"
+listen(12) → "accept connections on it, queue them"
+```
+
+### One port, many connections — there are TWO kinds of socket
+*(2026-10-25)*
+
+A single port handles thousands of connections. The mechanism: **the listening
+socket is not the connection socket.**
+
+Measured — 4 clients against one port:
+```
+LISTENING socket: fd=12  port=9997
+(data never flows on this socket — it only "listens" for connections)
+
+  new CONNECTION socket: fd=15 | client: 127.0.0.1:52443 | server: 127.0.0.1:9997
+  new CONNECTION socket: fd=16 | client: 127.0.0.1:52444 | server: 127.0.0.1:9997
+  new CONNECTION socket: fd=15 | client: 127.0.0.1:52445 | server: 127.0.0.1:9997
+  new CONNECTION socket: fd=14 | client: 127.0.0.1:52446 | server: 127.0.0.1:9997
+```
+
+1. **The listening socket (`fd 12`)** sits on port 9997 and does exactly one job:
+   report *"someone wants to connect."* **Your data never touches it.**
+2. **Each connection gets its own brand-new socket and fd** (15, 16, 14...).
+   Data flows there. (fd 15 reappears because an earlier connection closed and
+   the kernel recycles the number.)
+
+**How the kernel tells connections apart — the 4-tuple:**
+```
+(client IP, client port, server IP, server port)
+ 127.0.0.1   52443      127.0.0.1   9997     ← connection #1
+ 127.0.0.1   52444      127.0.0.1   9997     ← connection #2
+```
+The server half is identical for all of them; **the client's port differs every
+time**, so each connection is uniquely identifiable. That is why one port can
+hold hundreds of thousands of connections.
+
+**So `accept()` is the step that was missing from my model:**
+```
+fd 12 readable  →  "a connection is waiting"
+                →  Node: accept(12)  →  kernel returns a NEW fd 15
+                →  Node registers fd 15: "tell me when data arrives on it"
+                →  data arrives  →  read(15) → llhttp → my handler
+```
+
+> **Precision:** on a listening socket Node asks to be told about a **connection**,
+> not a *request*. Requests only exist after `accept()`, and only once bytes have
+> been read and parsed.
+
+### What the kernel does vs what Node does
+Proof — the server's JS thread was **frozen for 3 seconds** while a client
+connected and sent a request:
+```
+[server @3ms]    listening, fd = 12
+[server @3ms]    JS thread JAMMED for 3s...
+  [client @802ms] connect + request sent (server's JS is frozen)
+[server @3004ms] JS thread free
+[server @3006ms] JS handler ran — only NOW did I see the request
+  [client @2799ms] got: 200
+```
+No `ECONNREFUSED`. The connection was established and the request buffered
+**with zero JavaScript running.**
+
+| Kernel's job | Node's job (userspace) |
+|---|---|
+| TCP handshake (SYN/SYN-ACK/ACK) | `read(fd)` from the receive buffer |
+| **Accept queue / backlog** | `llhttp` parses bytes → request object |
+| Packets → ordered byte stream, dedup | **TLS decrypt via OpenSSL** (*not* kernel) |
+| **Receive buffer** (data waits here) | your JS handler |
+| Send buffer, retransmits, ACKs | `write(fd)` into the send buffer |
+| Flow + congestion control (window) | |
+| FIN/FIN-ACK, `TIME_WAIT` | |
+| TCP keepalive | |
+
+> **The boundary:** the kernel handles **bytes**; Node handles **meaning**. The
+> kernel has no idea what HTTP is.
+
+**Consequence:** a blocked server does not look *down*, it looks *slow*. The
+kernel happily accepts connections, so monitoring sees **timeouts, not
+connection-refused** — the most confusing failure mode to debug.
+
+### libuv holds the callback — the kernel never does
+*(correction, 2026-10-25)*
+
+**I believed:** *"Node tells the OS kernel about the async operation and gives it
+the callback; when the kernel finishes, it hands the callback to the main
+thread."*
+
+**Wrong — the kernel has no idea JavaScript exists.** Its entire vocabulary is:
+*"fd 15 is readable"*, *"fd 16 is writable"*, *"this operation completed."*
+Numbers and statuses. Nothing else.
+
+**The callback lives in libuv:**
+```
+Node:   "tell me when fd 15 is readable"   → kernel   (registered in epoll/kqueue)
+        and stores the callback in libuv's own tables
+
+kernel: "fd 15 ready"                       → libuv    (that is all it says)
+
+libuv:  looks up its table → finds fd 15's callback
+        → the event loop runs it on the main thread
+```
+
+> **Rule:** the kernel reports **readiness**. **libuv** remembers which
+> JavaScript that readiness belongs to. The kernel never calls into JS.
+
+### Completion time ≠ callback run time
+A second thing hidden in the same correction: **a callback does not run the
+moment its work finishes.** Completion only makes it *eligible*. It actually runs
+when **(a)** the main thread is free and **(b)** the event loop reaches the right
+phase.
+
+So the real sequence is: *work completes → callback is queued → event loop runs
+it later.* Where "later" can be microseconds or (if the thread is blocked)
+seconds. **Deciding that order is the event loop's entire job — Lesson 1.5.**
+
+### Queued work is delayed, not lost
+10 clients request during a 2-second block:
+```
+[server @2002ms] JS thread FREE
+[server @2005ms] handler #1  (/req-1)
+[server @2009ms] handler #2  (/req-2)
+...
+[server @2012ms] handler #10 (/req-10)
+```
+**All 10 arrive**, and all 10 run within ~7 ms of the thread freeing.
+
+> **"One thread" ≠ "one request".** One at a time (✅ true: #1 completes, then
+> #2 — never parallel) is not the same as only one (❌ false: all 10 are
+> delivered). One thread limits **how much runs at once**, not **how much can be
+> held**.
+
+So a 2-second block means **2 seconds of added latency for everyone queued**, not
+lost data — and they all land together (**thundering herd**), which is exactly
+the latency-spike shape seen on dashboards after a block.
+
+**The real limit:** the accept queue is finite (Node's default backlog **511**):
+```js
+server.listen(8888, "0.0.0.0", 511);   // third arg = backlog
+```
+Block long enough and the queue fills — then the **kernel** starts dropping new
+connections, and *that* is where real loss begins.
+
+### The real ceiling is file descriptors, not ports
+*(2026-10-25)*
+
+A server holding **10,000 concurrent connections** on port 8080 has
+**10,001 socket fds open**: 10,000 connection sockets + 1 listening socket.
+
+```bash
+ulimit -n        # this machine: 1048576 (containers are often 1024)
+```
+
+Hit the limit and Node reports:
+```
+Error: EMFILE: too many open files
+```
+
+Two things that make this nastier than it looks:
+
+**1. You crash before reaching the number.** With `ulimit -n 1024` the failure
+comes around ~1015 connections, because fds are not only sockets: stdin/stdout/
+stderr (0, 1, 2), the listening socket, every DB pool connection, open log files
+and config files all consume fds from the same budget. **The usable ceiling is
+always lower than the limit**, by an amount specific to your process.
+
+**2. The server does not go down — it goes half-dead.**
+- the connections already established keep working perfectly
+- new connections are refused
+- CPU normal, memory normal, DB fast, and a health check riding an existing
+  connection **still passes**
+
+Monitoring says "healthy", users say "the site won't load". A **partial failure**
+like this is harder to diagnose than an outright crash.
+
+> **The same structural lesson as the heap — now seen twice:**
+>
+> | | Heap (`--max-old-space-size`) | File descriptors (`ulimit -n`) |
+> |---|---|---|
+> | Set / raise the limit | makes the failure **visible** | buys immediate relief |
+> | Find the leak | **the actual fix** | **the actual fix** |
+>
+> Raising a limit postpones a crash; it never cures one. If sockets or DB
+> connections are leaking, `EMFILE` will come back. Do both, in that order.
+
+### The complete request lifecycle — my model, corrected
+*(I wrote this out myself on 2026-10-25; 6 of 8 points were right. Marked below,
+then the corrected version in full.)*
+
+**Startup**
+1. ✅ `node app.js` → a process starts
+2. ✅ the kernel creates a socket and gives Node its fd; Node says "tell me when
+   something arrives" — *sharpening: on a listening socket that means a
+   **connection**, not a request*
+3. ✅ the kernel watches the port
+
+**One request**
+1. 🟡 "the kernel tells Node, and Node runs my JS on the main thread" — true, but
+   **two steps were missing**: `accept()` (new fd), then `read()` + `llhttp`
+   parsing, *before* any JS runs
+2. ❌ "for a file read or any async operation, Node tells the **kernel** and gives
+   it the callback" — **two errors**: the callback goes to **libuv**, not the
+   kernel; and `fs` does **not** go to the kernel at all — it goes to the
+   **thread pool**
+3. ❌ "when the kernel finishes, it hands the callback to the main thread" — the
+   kernel only reports readiness; **libuv** finds the callback and the **event
+   loop** decides when it runs
+
+**Many requests**
+1. ✅ if the thread is blocked, requests queue in the kernel
+2. ✅ if the thread is free, **all** of them are delivered and run one after
+   another, very fast — *(this corrected my earlier M-004 myself)*
+
+---
+
+**The corrected flow, end to end:**
+
+```
+STARTUP
+  node app.js                        → OS creates the process
+  socket() / bind() / listen()       → kernel makes the listening socket, returns fd 12
+  register fd 12 with epoll/kqueue   → "tell me when a connection waits"
+
+A CONNECTION ARRIVES
+  kernel completes the TCP handshake            ← no JavaScript involved
+  kernel queues it in the accept backlog (511)
+  kernel: "fd 12 readable"            → libuv
+  Node: accept(12)                    → kernel returns a NEW fd 15
+  Node registers fd 15                → "tell me when data arrives"
+
+A REQUEST ARRIVES ON THAT CONNECTION
+  kernel receives packets, orders them, buffers the bytes
+  kernel: "fd 15 readable"            → libuv
+  Node: read(15)                      → pull bytes out of the kernel buffer
+  llhttp parses them                  → method, path, headers        (C++, main thread)
+  [TLS? OpenSSL decrypts here        → userspace, NOT the kernel]
+  MY HANDLER RUNS                                                    (main thread)
+
+MY HANDLER STARTS ASYNC WORK — and the path depends on what it is
+  DB query / API call / sending the response
+      → register the socket with the kernel, store the callback in libuv
+      → main thread is FREE                           ← no thread used at all
+  fs / dns.lookup / zlib / crypto
+      → hand it to the THREAD POOL (4 threads), store the callback in libuv
+      → a pool thread does an ordinary BLOCKING read
+      → main thread is FREE                           ← a thread *was* used
+      → if all 4 are busy, the work does not even START
+
+THE WORK FINISHES
+  kernel or pool thread → "done"      → libuv
+  libuv looks up the callback for it
+  the callback is QUEUED — it does not run yet
+  the event loop runs it when the main thread is free and the phase is right
+  → back into my JavaScript
+
+RESPONDING
+  res.end(...)   → write(15) into the kernel send buffer
+  the kernel handles transmission, ACKs and retransmits from here on
+```
+
+**The one sentence that holds it together:** *the main thread never waits — it
+registers the work, hands the callback to libuv, and moves on. Whether a thread
+was consumed depends entirely on which of the two paths the work took.*
+
+---
+
+## Event Loop
+_pending — Lesson 1.5. The piece that decides **in what order** the ready work
+from libuv actually runs._
+
+## process & globals
 _pending_
 
 ## Modules
@@ -443,4 +856,28 @@ _pending_
 
 ## Things I Previously Misunderstood
 _Corrections live here so they stick. See also `mistakes.md`._
-_(none yet)_
+
+- **"A blocked server receives only one of the queued requests."**
+  I reasoned: one thread → one request. Wrong — **all** queued requests are
+  delivered; they just run one at a time. One thread caps *concurrency*, not
+  *how much work can be held*. 10 queued requests all ran within 7 ms of the
+  thread freeing. Block = **delay for everyone**, not data loss (loss only
+  starts when the 511-deep accept queue overflows).
+- **"The kernel's socket and Node's socket are two different things."**
+  There is **one** socket, in the kernel. Node holds only an **fd** (an
+  integer). Token vs coat.
+- **"Node gives the callback to the OS kernel, and the kernel runs it."**
+  The kernel knows nothing about JavaScript — it only reports *"fd N is ready"*.
+  **libuv** stores the callback and the **event loop** decides when it runs.
+  Also: a callback does not run when the work *completes*, only when the thread
+  is free and the loop reaches the right phase.
+- **"Any async operation is handed to the OS kernel."**
+  Only **network** I/O works that way. `fs`, `dns.lookup`, `zlib` and some
+  `crypto` go to the **4-thread pool**, where an ordinary **blocking** call is
+  made on a pool thread. It feels async because *my* thread isn't blocked — but
+  a thread somewhere was, which is exactly why the pool saturates and the kernel
+  path never does.
+- **"A blocked server loses the requests that arrive during the block."**
+  They are delayed, not lost — all of them land at once when the thread frees
+  (thundering herd). Real loss starts only when the 511-deep accept queue
+  overflows, or when fds run out (`EMFILE`).
