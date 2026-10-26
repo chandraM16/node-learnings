@@ -1,6 +1,6 @@
 # Learning Progress
 
-_Last updated: 2026-10-25 (Lesson 1.4 complete; progress reconciled across both sessions)_
+_Last updated: 2026-10-26 (Exercise 1.4 evaluated; M-009, M-010 logged; mistakes.md renumbered after a cross-session collision)_
 
 ## Current Phase
 **Phase 1 — Node.js Foundations** → next: Lesson 1.5 (Event loop, part 1)
@@ -76,7 +76,7 @@ _Populated as topics are taught. Format: topic — state — note._
 | 1.1 What Node.js is (runtime anatomy) | **Practiced** | R1–R5 answered 2026-10-20, 4/5 solid |
 | 1.1a Globals: window/document/process/fetch/require | **Practiced** | 5/5 in Task 2 |
 | 1.1b The process & PID | **Practiced** | gap in Task 3, taught, then used correctly in R5 |
-| 1.1c Why a process stays alive (handle refcount) | Introduced | M-002; **in revisit queue** |
+| 1.1c Why a process stays alive (handle refcount) | **Mastered** | recalled correctly after a 5-day gap (W1, 2026-10-25), unprompted and in the right vocabulary |
 | 1.1d CJS vs ESM detection | Introduced | surfaced early; full lesson 1.10–1.12 |
 | 1.2 Node vs browser JS | **Practiced** | 6/6 predictions; CORS + sandbox blast radius taught after |
 | 1.2a Trust model (why fs exists in Node, not browser) | **Practiced** | reasoned it independently in Task 3/4 |
@@ -84,17 +84,22 @@ _Populated as topics are taught. Format: topic — state — note._
 | 1.3 V8 — tiered JIT & warm-up | **Practiced** | measured 8.32x cold/hot ratio himself |
 | 1.3a Heap limits & fatal OOM | **Practiced** | strong Task 3 answer, incl. "raising the limit isn't the fix" |
 | 1.3b GC (generational, stop-the-world) | Introduced | not yet exercised; Phase 8 depth |
-| 1.3c CPU-bound blocking the loop | Introduced | got the queuing half of Task 4, **missed the memory half** |
+| 1.3c CPU-bound blocking the loop | **Practiced** | W2: correctly derived blocked loop → no health response → orchestrator restarts a healthy pod |
+| 1.3d Missed timer ticks are lost, not replayed | Introduced | **M-008** — over-generalized M-004; corrected with measurement |
 | 1.4 libuv — role & OS portability (epoll/kqueue/IOCP) | Introduced | |
 | 1.4a **Concurrency comes from the kernel, not threads** (A1) | **Practiced** | explained the register-and-move-on model back, unprompted |
-| 1.4b Two paths: OS notification vs thread pool | Introduced | **got this wrong** 2026-10-25 (collapsed `fs` into "kernel"); corrected, needs re-test |
-| 1.4c Thread pool size 4, saturation, `UV_THREADPOOL_SIZE` | Introduced | demos seen only; **Exercise 1.4 Tasks 1–4 pending** |
+| 1.4b Two paths: OS notification vs thread pool | **Practiced** | wrong on 2026-10-25 (collapsed `fs` into "kernel"); **re-tested by Exercise 1.4 Task 3 on 2026-10-26 and applied correctly, unaided** |
+| 1.4c Thread pool size 4, saturation, `UV_THREADPOOL_SIZE` | **Practiced** | reproduced the batching himself (after an instrumentation fix) |
 | 1.4d "Node is single-threaded" — the full truth | **Practiced** | applied it correctly: "ek ke baad ek execute hogi" |
 | 1.4e A socket is a kernel object; Node holds an fd | **Practiced** | M-005 corrected, then used it to reason about fd counts |
 | 1.4f Kernel's job vs Node's job | Introduced | missed the `read()`+llhttp step, and **put the callback in the kernel instead of libuv** — corrected |
 | 1.4g Queued work is delayed, not lost | **Practiced** | self-corrected M-004 without being re-taught |
 | 1.4h One port ↔ many connections (listening vs connection socket, 4-tuple) | **Practiced** | answered 10,001 fds + `EMFILE` correctly |
 | 1.4i fd limits, `EMFILE` as a *partial* failure | Introduced | **revisit in Phase 6** |
+| 1.4j CPU-bound vs I/O-bound work *inside* the pool | Introduced | **M-009** — swept pool 1→32; gains flatline at core count (8) |
+| 1.4k Capacity math (threads, cores, ceiling) | Introduced | got 40 logins/s right; missed the 80/s cores ceiling |
+| 1.4l The DNS trap (shared-pool starvation) | **Practiced** | **derived the whole chain unaided** — strongest answer to date |
+| 1.4m Measurement hygiene | Introduced | **M-010** — his own baseline bug hid the batches he was measuring |
 | 1.5 Event loop part 1 | not started | **next** |
 | 1.6–1.15 | not started | see roadmap |
 
@@ -106,7 +111,7 @@ _Populated as topics are taught. Format: topic — state — note._
 | 1.1 — What Node.js is | Tasks done; review Qs initially skipped, then 4/5 solid on retry |
 | 1.2 — Node vs browser | **6/6** predictions correct (predicted before running); Tasks 3–4 reasoned well |
 | 1.3 — V8 | Tasks 1–2 correct; **Task 3 strong** (production-grade answer); Task 4 half |
-| 1.4 — libuv | Tasks 1–4 + W1/W2 **still pending**. Instead he wrote out his entire mental model unprompted (8 points): **6 correct, 2 corrected** (callback ownership, `fs` vs network path). Then answered the follow-up fd question (10,001 + `EMFILE`) correctly |
+| 1.4 — libuv | **Complete.** First wrote out his entire mental model unprompted (8 points): **6 correct, 2 corrected** (callback ownership, `fs` vs network path), then answered the fd follow-up (10,001 + `EMFILE`) correctly. W1 correct after a 5-day gap; W2 half (M-008). Tasks: 1 half, 2 mechanism-only, **3 full marks**, 4 half (M-009). Found an instrumentation bug in his own file (M-010) |
 
 ## Projects
 
@@ -144,6 +149,12 @@ from the assessment (these are the gaps that hurt a backend engineer most):
     kis layer ka hai?"
 11. **Memory as a capacity constraint** — got the queuing failure but not the
     concurrent-memory failure, despite nailing the memory question just before.
+12. **CPU-bound vs wait-bound bottlenecks** (M-009) — the single most useful
+    diagnostic question in backend performance work; recurs at `worker_threads`,
+    scaling, and queue sizing.
+13. **Measurement hygiene** (M-010) — answers tend to come from theory rather
+    than from running the experiment, and a broken instrument went unnoticed.
+    Keep asking what he actually observed, with numbers.
 12. **Which work goes to the thread pool vs the kernel** — 2026-10-25: assumed
     "any async operation → OS kernel". `fs`/`dns.lookup`/`zlib`/`crypto` go to
     the 4-thread pool instead. Load-bearing for Lesson 1.5; re-test there.
@@ -169,6 +180,17 @@ _Items pulled into later lessons to test retention._
   twice (heap, fds). Re-ask in Phase 8 as a general principle.
 - **M-004: queued connections are delayed, not lost** — re-ask in Lesson 1.5,
   and again when backlog/`listen()` comes up in Phase 4
+- **M-008: but missed timer ticks ARE lost** — ask these two together, since the
+  pair is the real lesson. Re-ask in Lesson 1.6 and Phase 6 (scheduling)
+- **`setInterval` must never be used to count time** — re-ask in Lesson 1.6
+- **Callbacks are held by libuv, not the kernel (M-006)** — **ask at the start
+  of Lesson 1.5**; the whole lesson depends on it
+- **Pool work blocks a real thread (M-007)** — re-ask in Phase 3
+- **CPU-bound vs wait-bound: more threads only helps the latter (M-009)** —
+  re-ask in Phase 3 (`worker_threads`) and Phase 6 (scaling)
+- **Verify the instrument before trusting the measurement (M-010)** — re-ask in
+  Phase 8 (profiling) and Phase 6 (metrics)
+- **Keep-alive agents / DNS caching for outbound calls** — re-ask in Phase 6
 - **Thread pool is 4 by default; `fs`/`dns.lookup`/`zlib`/`crypto` share it** —
   re-ask when `worker_threads` arrives (Phase 3) and at bcrypt/auth (Phase 4)
 - **Thread pool does not parallelise JavaScript** — re-ask in Phase 3
@@ -192,9 +214,27 @@ _Items pulled into later lessons to test retention._
   being delayed rather than lost). **Encourage this.** Two misconceptions
   surfaced and were corrected in the process (M-004, M-005), which is exactly
   what asking questions is supposed to do.
-- Caution: four lessons are now *Introduced* with Exercise 1.4 unanswered.
-  Lesson 1.5 (event loop) depends directly on 1.4, so the exercise should not be
-  skipped — the thread-pool and kernel-queue models are load-bearing for it.
+- 2026-10-25: retention after a 5-day gap is **good** — W1 recalled with the
+  right mechanism and vocabulary (promoted 1.1c to Mastered). W2's error was an
+  *over-generalization of a correctly learned rule*, which is a much better class
+  of mistake than a blank. **Teaching note:** when a rule has an exception, teach
+  the pair together (queued data vs elapsed time), or the student will correctly
+  learn the rule and then mis-apply it.
+- 2026-10-26: Exercise 1.4 complete. **Task 3 was genuinely excellent** — he
+  chained external API to `dns.lookup` to shared pool to an unrelated feature
+  starving, unaided, and saw why the *unrelated* symptom was the decisive clue.
+  That is diagnostic reasoning, not recall.
+  Weaker pattern, now seen twice: **he reasons from theory and skips the
+  measurement.** Task 1's `=16` comparison was skipped, Task 2's answer was
+  mechanism-only, and his own test file had a baseline bug that hid the result.
+  **Adjustment:** exercises must now report *observed numbers*, and "what I
+  expected vs what I saw" is part of every answer.
+  Also: he asked me to supply Task 4's remaining approaches instead of
+  attempting them. Answered this time (the capacity ceiling needed teaching
+  anyway), but next time require one attempt first.
+- Housekeeping: a numbering collision happened in `mistakes.md` because the fork
+  and this session both appended entries. **Check existing entry numbers before
+  appending.**
 - Pattern to keep watching: he reasons well about *sharing* and about *memory*
   in isolation, but does not yet combine constraints (memory × concurrency).
   Also tends to drop to the lowest available abstraction level when unsure.
@@ -222,6 +262,21 @@ _Items pulled into later lessons to test retention._
   First half right (they wait in the kernel), second half wrong (all 10 get
   delivered). `corrected` — **needs a spaced-rep check in Lesson 1.5**.
 - **M-005** — "Kernel ka socket aur Node ka socket alag hote hain." `corrected`.
+- **M-006** — "Callback kernel ko dete hain, kernel usko chalata hai."
+  `corrected` (from the fork). Callbacks live in **libuv**; the kernel only
+  reports readiness on fds. **Load-bearing for Lesson 1.5.**
+- **M-007** — "Koi bhi async operation kernel ko jaata hai." `corrected` (fork).
+  `fs`/`dns.lookup`/`zlib`/`crypto` take a **pool thread that really blocks**.
+- **M-008** — "Missed timer ticks baad mein chal jaayenge." `corrected`.
+  **Caused by correctly learning M-004 and over-applying it** — timers are the
+  exception: a timer is a deadline, not a queue. (Originally mis-numbered M-006;
+  the fork had already used that number.)
+- **M-009** — "Pool badhane se CPU-bound kaam bhi tez hoga." `corrected`.
+  Pool gains stop at core count. **Re-check in Phase 3** — "slow, add workers"
+  is the same reflex there.
+- **M-010** — Instrumentation bug (baseline reset inside the callback) hid the
+  very behaviour the exercise measured. `corrected`. Companion lesson: "no
+  difference observed" is not "mechanism absent" — the test was too small.
 - **M-006** — "Callback kernel ko dete hain aur kernel usko chalata hai."
   Callback libuv ke paas hai; kernel sirf readiness batata hai. Also surfaced:
   completion ≠ callback run time. `corrected` — **spaced-rep in Lesson 1.5**.
@@ -251,7 +306,8 @@ _Items pulled into later lessons to test retention._
 ---
 
 ## Next Up
-1. **Exercise 1.4 Tasks 1–4 + W1/W2** — gate before Lesson 1.5
-2. Lesson 1.5 — Event loop, part 1 (phases, microtasks, `nextTick`)
-   — opens with spaced-rep checks on M-004 and handle refcount
-3. Lesson 1.6 — Timers
+1. **Lesson 1.5 — Event loop, part 1** (phases, microtasks, `nextTick`)
+   — open with spaced-rep checks on M-006 (callbacks live in libuv),
+   M-004 vs M-008 (queued data is delayed, elapsed time is lost), and M-009
+2. Lesson 1.6 — Timers (`setTimeout`/`setInterval`/`setImmediate`, timer drift)
+3. Lesson 1.7 — I/O and the thread pool, revisited with the event loop in place

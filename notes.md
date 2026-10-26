@@ -742,6 +742,110 @@ was consumed depends entirely on which of the two paths the work took.*
 
 ---
 
+### CPU-bound vs I/O-bound work *inside* the thread pool
+**Exercise 1.4 · 2026-10-26**
+
+The pool holds two very different kinds of work, and they scale differently.
+
+**CPU-bound in the pool** (`pbkdf2`, `bcrypt`, `scrypt`, `zlib`): measured with
+8 × `pbkdf2(300k iterations)` on an **8-core** machine:
+```
+pool=1   431ms
+pool=2   242ms
+pool=4   126ms
+pool=8    97ms     ← flatlines at core count
+pool=16   96ms
+pool=32   97ms
+```
+Past `cores`, extra threads just time-share the same CPUs — same work, same
+time, plus context-switch overhead.
+
+**I/O-bound in the pool** (`fs`, `dns.lookup`): these *wait* rather than compute,
+so a pool larger than the core count still helps.
+
+> **Rule:** raising `UV_THREADPOOL_SIZE` helps work that **waits** (disk, DNS).
+> Work that **burns CPU** is capped by **cores**, not by pool size.
+> *Simple words mein: CPU bottleneck hai toh zyada threads se kuch nahi hota —
+> zyada machines chahiye, ya kam kaam.*
+
+### A bottleneck you cannot see is not a bottleneck you don't have
+8 × `fs.readFile` on a **small** file, pool=4 vs pool=1:
+```
+pool=4 → all 8 done @ 1ms
+pool=1 → all 8 done @ 1ms      ← no difference at all
+```
+The batching mechanism is fully present; each read just takes ~0.1ms, so 8
+sequential reads still finish in 1ms. Same test with a **50 MB** file × 16:
+```
+pool=1  207ms
+pool=2   61ms
+pool=4   37ms
+pool=8   33ms
+```
+> **"No difference" usually means the test was too small**, not that the
+> mechanism is absent. The most common mistake in performance testing is a load
+> too light to activate the bottleneck.
+
+### Measuring correctly comes before measuring at all
+A one-line instrumentation bug — resetting the baseline inside the callback
+(`let t0` … `t0 = Date.now()` in the handler) — turned clean batch timings into
+noise:
+```
+buggy: 60, 2, 0, 0, 61, 3, 0, 2          ← looks random, batches invisible
+fixed: 62, 63, 64, 64, 122, 125, 126, 127 ← two obvious batches
+```
+Same program, same runtime; only the measurement differed. The buggy version
+reports "time since the previous callback", not "time since start".
+
+> **Ask first: is the thing I am measuring the thing I think I am measuring?**
+> Wrong timestamps, wrong metric windows, wrong dashboard aggregation — this is
+> a daily production failure mode, not a beginner mistake.
+
+`const` would have made this bug impossible. Default to `const`; it prevents
+errors, it is not a style preference.
+
+### The DNS trap (worked example)
+Symptom set: CPU 20%, memory fine, the external payment API reports 50ms on its
+own dashboard, but our calls take 3s — **and an unrelated file-upload feature is
+also slow.**
+
+The unrelated feature slowing down is the decisive clue: payment calls and file
+uploads share exactly one resource — **the thread pool**. Each outbound call does
+a `dns.lookup()` (thread pool); under load those saturate all 4 threads, and
+`fs` work then starves behind them.
+
+Fixes, in order of leverage:
+1. **Keep-alive agent** — by default each outbound request makes a new
+   connection → new DNS + TCP + TLS. Reusing connections removes most lookups:
+   ```js
+   import { Agent } from "undici";
+   const agent = new Agent({ keepAliveTimeout: 60_000, connections: 50 });
+   ```
+2. **Cache DNS** — Node does **not** cache `dns.lookup` results (surprising).
+   Use something like `cacheable-lookup`.
+3. **Raise `UV_THREADPOOL_SIZE`** — valid here, because DNS *waits*.
+
+### Capacity math for a hashing endpoint
+`bcrypt` at ~100ms per hash, 8 cores:
+```
+default pool (4):  4 × (1/0.1s) =  40 logins/sec
+cores ceiling:     8 × (1/0.1s) =  80 logins/sec   ← hard limit
+required:                          200 logins/sec
+```
+Raising the pool gets 40 → 80 and **no further**. Options that actually work:
+
+| Approach | What it buys | Cost / caveat |
+|---|---|---|
+| Lower bcrypt cost factor | cost 12→10 = 4× faster (≈320/s) | **cost *is* the security**; decide with the security team, not for perf alone |
+| **Horizontal scaling** | 3–4 machines → 200/s comfortably | the real production answer; works because login is **stateless** |
+| Hash less often | token/session after one verify; per-request token checks are ~1000× cheaper | if clients send passwords per request, that is a **design bug**, not a capacity problem |
+| Rate limiting (per account + per IP) | stops brute force **and** protects CPU | a bcrypt endpoint is a **CPU DoS vector** — 1000 wrong passwords burn your cores |
+| Bulkhead (separate auth service) | a login spike stops taking down the whole API | adds no capacity; limits blast radius |
+
+**Does not work:** `worker_threads`. Same 8 cores. The shortage is **CPU**, not
+threads. (This is the most common wrong answer when worker threads come up —
+Phase 3.)
+
 ## Event Loop
 _pending — Lesson 1.5. The piece that decides **in what order** the ready work
 from libuv actually runs._

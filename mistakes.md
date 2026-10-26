@@ -166,3 +166,132 @@ Pool bhara ho toh kaam **shuru bhi nahi hota**, line mein lagta hai.
 
 **Revisit:** Lesson 1.5, phir Phase 3 (streams, `worker_threads`), phir Phase 4
 (bcrypt/auth capacity).
+
+---
+
+## M-008 — "Missed timer ticks baad mein chal jaayenge"
+- **Date:** 2026-10-25 (warm-up W2, after a 5-day gap)
+- **Status:** `corrected` — needs a spaced-rep check in Lesson 1.5/1.6
+
+**Maine kya kaha:** "jab main thread free ho jayegi tab woh health/request chalegi."
+
+**Ye over-generalization thi, aur achhe reason se.** (Ye entry pehle galti se
+M-006 number ki gayi thi — woh number fork session ne already le liya tha.
+Ab M-008 hai.) M-004 mein seekha tha ki
+*queued work delayed hota hai, lost nahi* — 10 clients block ke dauraan aaye aur
+saare 10 handlers thread free hone ke 7ms mein chal gaye. Woh sahi hai.
+Main ne wahi rule timers pe bhi laga diya. **Timers exception hain.**
+
+**Measured** (3s run, 100ms interval, 2s block beech mein):
+```
+Ticks hone chahiye the: 30
+Actually hue:            9
+Khoye:                  21
+Fire times (ms): 101, 202, 303, 404, 2501, 2602, 2703, 2807, 2908
+```
+404ms ke baad **seedha 2501** — ek hi tick, 20 ka burst nahi. 21 ticks gaye.
+
+**Farak kyun:**
+| | Pending connection | Missed tick |
+|---|---|---|
+| Kya hai | **data**, kernel queue mein padi | ek **samay** jo guzar gaya |
+| Kahan rakhi hai | kernel memory mein, physically | kahin nahi |
+| Unblock pe | **sab deliver** | **ek baar**, phir reschedule |
+
+> **Timer ek deadline hai, queue nahi. Data jama hoti hai; samay jama nahi hota.**
+
+`setInterval(fn, 100)` = "**kam se kam** 100ms baad", not "har 100ms pe exactly once".
+
+**Production mein:**
+- `setInterval` se **kabhi ginti mat karo** (`seconds++` jhooth bolega) — samay
+  ke liye `Date.now()`.
+- Interval pe chalne wala koi bhi kaam chup-chaap skip ho sakta hai: metrics
+  push, cache refresh, cleanup, heartbeat. **Koi error nahi, koi log nahi.**
+  Isliye important periodic kaam queue + scheduler pe jaata hai (Phase 6).
+
+**Revisit:** Lesson 1.5 (event loop timers phase), Lesson 1.6 (timers),
+Phase 6 (scheduling, cron in multiple instances).
+
+---
+
+## Note — W1 pe ek sharpening (galti nahi)
+"Process **kill** nahi hoti" → sahi shabd: "process **exit** nahi karti".
+Koi usse maar nahi raha; woh khud nikalna nahi chahti kyunki handle counter
+zero nahi hua. Ye farak Phase 6 mein bada hota hai, jahan `SIGTERM` (request)
+aur `SIGKILL` (zabardasti) do alag cheezein hain.
+
+---
+
+## M-009 — "Pool badhane se CPU-bound kaam bhi tez ho jaayega"
+- **Date:** 2026-10-26 (Exercise 1.4, Tasks 1 & 4)
+- **Status:** `corrected` — re-check in Phase 3 (`worker_threads`)
+- **Related:** [[M-007]] ne do raaste alag kiye the; ye entry batati hai ki
+  **pool wale raaste ke andar bhi** do tarah ka kaam hota hai.
+
+**Maine kya kaha:** Task 1 mein `=16` vs `=8` ka comparison skip kiya, aur Task 4
+mein likha "`UV_THREADPOOL_SIZE` badhana kaafi hoga".
+
+**Measured (8-core machine, 8 x pbkdf2 300k iterations):**
+```
+pool=1  431ms      pool=8   97ms   <- yahan flat ho gaya
+pool=2  242ms      pool=16  96ms
+pool=4  126ms      pool=32  97ms
+```
+8 pe graph flat — aur 8 = is machine ke cores.
+
+> **Rule:** pool badhane se fayda **sirf us kaam mein** hota hai jo *intezaar*
+> karta hai (disk, DNS). Jo kaam *CPU khaata hai*, uski limit **cores** hain,
+> pool size nahi.
+
+16 threads 8 cores pe = har thread aadhi speed. Kaam utna, time utna, upar se
+context-switching ka kharcha.
+
+**Task 4 ki capacity (bcrypt ~100ms, 8 cores):**
+```
+default pool (4):  40 logins/sec
+cores ka ceiling:  80 logins/sec   <- isse aage pool se kuch nahi
+chahiye:          200 logins/sec
+```
+Asli raaste: **horizontal scaling** (login stateless hai), bcrypt cost factor
+(par cost hi security hai — security team ke saath faisla), **hashing kam baar**
+karna (token/session, kyunki per-request password bhejna design bug hai),
+rate limiting (brute force + CPU DoS dono se bachav), bulkhead (nuksaan rokna).
+
+**`worker_threads` bhi kaam NAHI karega** — wahi 8 cores. Threads ki kami
+problem nahi thi, CPU ki kami thi.
+
+**Kyun yaad rakhna:** "dheema hai -> zyada threads/workers daal do" ek reflex
+ban jaata hai. Pehla sawaal hamesha: **bottleneck CPU hai ya wait?**
+
+---
+
+## M-010 — Measurement bug: baseline callback ke andar reset kar diya
+- **Date:** 2026-10-26 (Exercise 1.4, Task 1)
+- **Status:** `corrected`
+
+`const t0` ko `let t0` kiya aur callback ke andar `t0 = Date.now()` daal diya.
+Matlab "shuru se kitna time" ki jagah **"pichhle callback se kitna time"** naapne
+laga.
+
+```
+buggy: 60, 2, 0, 0, 61, 3, 0, 2            <- batches gayab, noise jaisa dikha
+fixed: 62, 63, 64, 64, 122, 125, 126, 127  <- do saaf batches
+```
+
+Same program, same runtime — sirf measurement alag. Aur isi wajah se Task 1/2 ke
+jawaab **theory se** aaye, observation se nahi.
+
+> **Pehla sawaal hamesha:** jo main naap raha hoon, woh wahi hai jo main sochta
+> hoon ki naap raha hoon? Galat timestamp, galat metric window, galat dashboard
+> aggregation — ye production mein roz hota hai, beginner mistake nahi hai.
+
+`const` hota toh ye bug ho hi nahi sakta tha. **`const` default rakho** — woh
+galtiyan rokta hai, style ki baat nahi hai.
+
+**Saath wala sabak (Task 2):** "farak nahi dikha" ka matlab "mechanism nahi hai"
+nahi hota. Chhoti file pe 8 `readFile`, pool=1 aur pool=4 — **dono 1ms**.
+Wahi test 50MB x 16 pe: `207 -> 61 -> 37 -> 33ms`. **Mechanism wahi tha, test
+chhota tha** — bottleneck activate hi nahi hua. Performance testing ki sabse aam
+galti.
+
+**Revisit:** Phase 8 (profiling), Phase 6 (metrics).
