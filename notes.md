@@ -847,6 +847,188 @@ threads. (This is the most common wrong answer when worker threads come up —
 Phase 3.)
 
 ## Event Loop
+**Lesson 1.5 · 2026-10-26**
+
+The event loop is not magic — it is a literal `while` loop written in C inside
+libuv, and its only job is **deciding what runs next**.
+
+### The structure (simplified, but the shape is accurate)
+```c
+while (loop_is_alive(loop)) {       // <- the handle counter from Lesson 1.1
+    update_time();
+    run_timers();                   // 1. timers
+    run_pending_callbacks();        // 2. pending
+    run_idle_and_prepare();         // 3. internal
+    poll_for_io();                  // 4. POLL  <- the loop sleeps here
+    run_check_handles();            // 5. check (setImmediate)
+    run_close_callbacks();          // 6. close
+}
+```
+Six phases, always in this order. One pass is a **tick** / **iteration**.
+
+| Phase | Runs |
+|---|---|
+| **timers** | `setTimeout` / `setInterval` whose deadline has passed |
+| **pending** | some system callbacks deferred from the previous round (e.g. TCP errors) |
+| **idle, prepare** | Node internals |
+| **poll** | **I/O callbacks** — and where the loop *blocks* |
+| **check** | `setImmediate` |
+| **close** | `socket.on("close")`-style cleanup |
+
+> **Mental model:** a night guard walks six stations in a **fixed order**, doing
+> whatever work is waiting at each, then starts over. `setTimeout` leaves a note
+> at station 1; `setImmediate` leaves one at station 5. **You only leave notes —
+> the guard arrives on his own schedule.**
+
+`loop_is_alive()` **is the handle counter**: it hits zero, the `while` breaks,
+`uv_run()` returns, the process exits. A server runs for weeks because the
+listening socket keeps that count above zero.
+
+### The poll phase — where a server actually spends its life
+Unlike the others, this phase **waits**:
+- a timer pending → block until that timer is due
+- a `setImmediate` pending → don't block at all (0 ms)
+- nothing pending → **block indefinitely** until the kernel says something happened
+
+> **An idle, healthy Node server is asleep in the poll phase — blocked inside the
+> kernel at 0% CPU.** It is not polling or spinning; the kernel wakes it.
+
+Consequence: **CPU usage cannot tell you whether a Node service is healthy.**
+A blocked loop can sit at 100% CPU, and a perfectly busy server can sit near 0%.
+The metric that matters is **event loop lag** (Phase 6).
+
+### `process.nextTick` and microtasks are NOT phases
+They are two Node-level queues with a different rule entirely:
+
+> **After *every individual callback*** — timer, I/O, `setImmediate`, anything —
+> Node stops and drains:
+> 1. the **entire `nextTick` queue**, then
+> 2. the **entire microtask queue** (promises, `queueMicrotask`)
+>
+> …and only then moves to the next callback. Not at phase boundaries — **after
+> every single task.** (Node >= 11 behaviour.)
+
+Measured — two 0 ms timers, each queueing a microtask:
+```
+timer 1 shuru
+timer 1 khatam
+   timer 1 ka microtask      <- BEFORE timer 2
+timer 2 shuru
+timer 2 khatam
+   timer 2 ka microtask
+```
+If microtasks drained at phase boundaries, both timers would run first.
+
+### The full order, measured
+```
+1. sync: script start
+2. sync: middle
+3. sync: end                  <- ALL synchronous code first, completely
+4. nextTick                   <- then the nextTick queue
+5. microtask: promise         <- then microtasks
+5b. microtask: queueMicrotask
+6. timers phase: setTimeout 0 <- now the loop's first phase
+7. check phase: setImmediate  <- then check
+```
+
+**Memorise:** `sync code -> nextTick -> microtasks -> [loop phases begin]`
+
+### `nextTick` outranks microtasks
+```js
+Promise.resolve().then(() => console.log("promise A"));
+process.nextTick(()        => console.log("nextTick A"));
+Promise.resolve().then(() => console.log("promise B"));
+process.nextTick(()        => console.log("nextTick B"));
+```
+```
+nextTick A
+nextTick B      <- the whole nextTick queue first
+promise A
+promise B
+```
+Source order is irrelevant: `nextTick` has the higher-priority queue, and it is
+drained **completely** before microtasks get a turn.
+
+### Event loop starvation
+```js
+let n = 0;
+setTimeout(() => console.log("TIMER RAN (n =", n, ")"), 0);
+function recurse() {
+  if (++n < 1_000_000) process.nextTick(recurse);
+  else console.log("nextTick loop done, n =", n);
+}
+recurse();
+```
+```
+nextTick loop done, n = 1000000
+TIMER RAN (n = 1000000 )
+```
+**A million `nextTick`s ran before a 0 ms timer got a turn** — because the rule
+is "drain the whole queue", and the queue kept refilling itself. The loop's first
+phase never even started.
+
+> An infinite promise chain starves it the same way. The process stays alive, CPU
+> hits 100%, **and not one request is served.** It looks hung; it is actually very
+> busy doing the wrong thing.
+
+### `setTimeout(0)` vs `setImmediate` — order is not guaranteed
+Same file, six runs, **main module**:
+```
+run 1: setImmediate setTimeout
+run 2: setImmediate setTimeout
+run 3: setTimeout  setImmediate   <- !
+run 4: setImmediate setTimeout
+run 5: setImmediate setTimeout
+run 6: setImmediate setTimeout
+```
+`setTimeout(fn, 0)` is clamped to **1 ms**. Whether that millisecond has elapsed
+by the time the loop reaches its first timers phase depends on machine speed and
+load — hence the coin toss.
+
+The same code **inside an I/O callback**, six runs:
+```
+run 1..6: setImmediate setTimeout     <- 6/6, deterministic
+```
+Because we are already **inside the poll phase**, and **check comes right after
+poll**. The timer has to wait for the next iteration.
+
+> **Rule:** inside an I/O callback, `setImmediate` always beats `setTimeout(0)`.
+> In the main module it is a coin toss. Never depend on the order in either case.
+
+### Practical: yielding so the loop can breathe
+```js
+// Bad: blocks the loop for the whole batch
+for (const item of items) process(item);
+
+// Better: let the loop complete iterations
+async function processAll(items) {
+  for (let i = 0; i < items.length; i++) {
+    process(items[i]);
+    if (i % 100 === 0) await new Promise(r => setImmediate(r));
+  }
+}
+```
+Yielding on `setImmediate` lets the loop reach **poll**, so I/O callbacks, health
+checks and timers all get served. Slower overall, **but the server stays alive**.
+
+> **Critical distinction:** `await Promise.resolve()` does **not** help — it only
+> cycles the microtask queue and never lets the loop advance a phase. To give the
+> loop a full iteration you need `setImmediate` (or `setTimeout`). Most people
+> do not know this.
+
+### Gotchas
+| Belief | Reality |
+|---|---|
+| `setTimeout(fn, 1000)` fires at exactly 1s | **At least** 1s; longer if the loop is busy ([[M-008]]) |
+| `setImmediate` runs immediately | Runs in the **check** phase, next iteration |
+| `nextTick` means "next loop tick" | Opposite — it runs **before** any phase. The name is a historical mistake |
+| Recursive `nextTick` is harmless | Starves the loop completely |
+| `setTimeout(0)` vs `setImmediate` has a fixed order | Not in the main module |
+| 0% CPU means the service is idle | 100% CPU with a blocked loop is also possible — measure **event loop lag** |
+
+### Still to cover
+_Phase-by-phase internals, poll timeout computation, `AsyncLocalStorage` cost,
+event loop lag measurement: Lesson 1.6-1.7 and Phase 8._
 _pending — Lesson 1.5. The piece that decides **in what order** the ready work
 from libuv actually runs._
 

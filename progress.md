@@ -1,9 +1,9 @@
 # Learning Progress
 
-_Last updated: 2026-10-26 (Exercise 1.4 evaluated; M-009, M-010 logged; mistakes.md renumbered after a cross-session collision)_
+_Last updated: 2026-10-26 (Lesson 1.5 taught; Exercise 1.4 evaluated; mistakes.md renumbered after a cross-session collision)_
 
 ## Current Phase
-**Phase 1 — Node.js Foundations** → next: Lesson 1.5 (Event loop, part 1)
+**Phase 1 — Node.js Foundations** → Lesson 1.5 (Event loop, part 1)
 
 ### Baseline (assessment 2026-10-19)
 Answered honestly; 11 of 12 "pta nahi". Confirmed **genuine zero** on:
@@ -36,13 +36,17 @@ Language: Hinglish. TypeScript added as Phase 2.5.
   a forked session
 
 ## In Progress
-- **Lesson 1.5 — Event loop, part 1** — not started. Teed up three times now;
-  the open question is: *completion ≠ callback run time, so in what **order**
-  does ready work actually run?*
-- **Exercise 1.4 Tasks 1–4 + warm-ups W1/W2 remain unanswered** — thread-pool
-  sizing, the `fs.readFile` batching prediction, the DNS-trap debugging task,
-  and the bcrypt capacity design task. Tasks 3–4 test exactly what he has now
-  shown he understands, so they are worth collecting rather than dropping.
+- **Lesson 1.5 — Event loop, part 1** — **taught 2026-10-26.** It answers the
+  question that had been open for three lessons: *completion is not run time, so
+  in what **order** does ready work actually run?* Covered: the six phases, the
+  poll phase as the blocking point, `nextTick`/microtask drain points and
+  priority, starvation, `setTimeout(0)` vs `setImmediate` nondeterminism, and
+  yielding with `setImmediate`.
+- **Exercise 1.5 pending** — Tasks 1–4 plus warm-ups W1/W2/W3. **Task 1 is
+  assessment question B1 verbatim**, which at baseline got "main sure nahi hu".
+  That before/after comparison is the real measure of Phase 1 so far.
+- Exercise 1.4 is **complete** (2026-10-26): Task 3 full marks, Tasks 1/2/4 half,
+  and an instrumentation bug of his own found and fixed (M-010).
 
 ## Needs Review
 _(nothing yet)_
@@ -53,7 +57,7 @@ _(nothing yet)_
 
 | Phase | Title | State |
 |-------|-------|-------|
-| 1 | Node.js Foundations | **in progress** (4/15 lessons taught) |
+| 1 | Node.js Foundations | **in progress** (5/15 lessons taught) |
 | 2 | Asynchronous Node.js | not started |
 | 2.5 | TypeScript for Node Backend | not started |
 | 3 | Node.js Core APIs | not started |
@@ -100,7 +104,14 @@ _Populated as topics are taught. Format: topic — state — note._
 | 1.4k Capacity math (threads, cores, ceiling) | Introduced | got 40 logins/s right; missed the 80/s cores ceiling |
 | 1.4l The DNS trap (shared-pool starvation) | **Practiced** | **derived the whole chain unaided** — strongest answer to date |
 | 1.4m Measurement hygiene | Introduced | **M-010** — his own baseline bug hid the batches he was measuring |
-| 1.5 Event loop part 1 | not started | **next** |
+| 1.5 The loop as a `while` loop; six phases in fixed order | Introduced | |
+| 1.5a Poll phase: where the loop blocks; idle server sleeps at 0% CPU | Introduced | **CPU is not a health signal** — event loop lag is (Phase 6) |
+| 1.5b Loop exit condition **is** the handle counter | Introduced | ties directly to 1.1c (already Mastered) |
+| 1.5c `nextTick`/microtasks are not phases — drained after *every* callback | Introduced | measured: microtask ran between two 0 ms timers |
+| 1.5d `nextTick` outranks microtasks, and drains fully | Introduced | source order irrelevant |
+| 1.5e Event loop starvation | Introduced | 1,000,000 `nextTick`s beat a 0 ms timer |
+| 1.5f `setTimeout(0)` vs `setImmediate` nondeterminism | Introduced | 6 runs: 5-1 split in main module; 6/6 deterministic inside I/O |
+| 1.5g Yielding on `setImmediate` vs `await` (which does **not** help) | Introduced | the distinction most people miss |
 | 1.6–1.15 | not started | see roadmap |
 
 ---
@@ -111,6 +122,7 @@ _Populated as topics are taught. Format: topic — state — note._
 | 1.1 — What Node.js is | Tasks done; review Qs initially skipped, then 4/5 solid on retry |
 | 1.2 — Node vs browser | **6/6** predictions correct (predicted before running); Tasks 3–4 reasoned well |
 | 1.3 — V8 | Tasks 1–2 correct; **Task 3 strong** (production-grade answer); Task 4 half |
+| 1.5 — Event loop | **PENDING** — Tasks 1–4 + W1/W2/W3. Task 1 = assessment B1 (baseline: "main sure nahi hu") |
 | 1.4 — libuv | **Complete.** First wrote out his entire mental model unprompted (8 points): **6 correct, 2 corrected** (callback ownership, `fs` vs network path), then answered the fd follow-up (10,001 + `EMFILE`) correctly. W1 correct after a 5-day gap; W2 half (M-008). Tasks: 1 half, 2 mechanism-only, **3 full marks**, 4 half (M-009). Found an instrumentation bug in his own file (M-010) |
 
 ## Projects
@@ -234,7 +246,12 @@ _Items pulled into later lessons to test retention._
   anyway), but next time require one attempt first.
 - Housekeeping: a numbering collision happened in `mistakes.md` because the fork
   and this session both appended entries. **Check existing entry numbers before
-  appending.**
+  appending.** Same for `progress.md` topic letters (the fork had already used
+  1.4h/1.4i, so Exercise 1.4's rows continue at 1.4j).
+- 2026-10-26: Exercise 1.5 carries a **new standing requirement** — every
+  prediction must be submitted alongside the **actual output**, plus an explicit
+  "what I expected vs what I saw". This is the direct response to the M-010
+  pattern (reasoning from theory, skipping measurement).
 - Pattern to keep watching: he reasons well about *sharing* and about *memory*
   in isolation, but does not yet combine constraints (memory × concurrency).
   Also tends to drop to the lowest available abstraction level when unsure.
@@ -293,6 +310,7 @@ _Items pulled into later lessons to test retention._
       threads (assessment A1, answered 2026-10-24/25)
 - [ ] Can explain the event loop accurately, including phase ordering
 - [ ] Can predict output of non-trivial async code reliably
+      — **direct test pending**: Exercise 1.5 Task 1 is the baseline B1 question
 - [ ] Built a CLI tool with proper signal/exit-code handling
 - [ ] Built an HTTP API with zero frameworks
 - [ ] Can reason about streams and backpressure
@@ -306,8 +324,7 @@ _Items pulled into later lessons to test retention._
 ---
 
 ## Next Up
-1. **Lesson 1.5 — Event loop, part 1** (phases, microtasks, `nextTick`)
-   — open with spaced-rep checks on M-006 (callbacks live in libuv),
-   M-004 vs M-008 (queued data is delayed, elapsed time is lost), and M-009
+1. **Exercise 1.5** — Tasks 1–4 + warm-ups W1/W2/W3 (issued 2026-10-26 with
+   spaced-rep checks on M-006, M-004 vs M-008, and M-009)
 2. Lesson 1.6 — Timers (`setTimeout`/`setInterval`/`setImmediate`, timer drift)
 3. Lesson 1.7 — I/O and the thread pool, revisited with the event loop in place
